@@ -235,15 +235,19 @@ class SeqGAN(object):
             teacher_inp = tf.concat([tf.zeros_like(self.text_pl[:, :1]),
                                      self.text_pl[:, :-1]], axis=1)
             teacher_inp = tf.one_hot(teacher_inp, self.num_classes)
-            teacher_fn = tf.contrib.seq2seq.simple_decoder_fn_train(
-                encoder_state)
             seq_len = tf.ones((batch_size,), 'int32') * self.text_len_pl
-            teacher_preds, _, _ = tf.contrib.seq2seq.dynamic_rnn_decoder(
-                cell=cell,
+            train_helper = tf.contrib.seq2seq.TrainingHelper(
                 inputs=teacher_inp,
-                decoder_fn=teacher_fn,
                 sequence_length=seq_len)
-            teacher_preds = tf.einsum('ijk,kl->ijl', teacher_preds, output_W)
+            teacher_decoder = tf.contrib.seq2seq.BasicDecoder(
+                cell=cell,
+                helper=train_helper,
+                initial_state=encoder_state)
+            teacher_preds, _, _ = tf.contrib.seq2seq.dynamic_decode(
+                decoder=teacher_decoder,
+                output_time_major=False,
+                impute_finished=True)
+            teacher_preds = tf.einsum('ijk,kl->ijl', teacher_preds.rnn_output, output_W)
             teach_loss = tf.contrib.seq2seq.sequence_loss(
                 logits=teacher_preds,
                 targets=self.text_pl,
@@ -276,19 +280,32 @@ class SeqGAN(object):
 
             else:
                 embeddings = tf.eye(self.num_classes)
-                infer_fn = tf.contrib.seq2seq.simple_decoder_fn_inference(
-                    output_fn=output_fn,
-                    encoder_state=encoder_state,
-                    embeddings=embeddings,
-                    start_of_sequence_id=0,
-                    end_of_sequence_id=-1,
-                    maximum_length=self.text_len_pl - 1,
-                    num_decoder_symbols=self.num_classes,
-                    name='decoder_inference_fn')
+                infer_helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(
+                    embedding=embeddings,
+                    start_tokens=tf.zeros(batch_size),
+                    end_token=-1)
+                infer_decoder=tf.contrib.seq2seq.BasicDecoder(
+                    cell=cell,
+                    helper=infer_helper,
+                    initial_state=encoder_state)
+                generated_sequence, _, _ = tf.contrib.seq2seq.dynamic_decode(
+                    decoder=infer_decoder,
+                    output_timer_major=False,
+                    impute_finished=True,
+                    maximum_iterations=10)
+                #infer_fn = tf.contrib.seq2seq.simple_decoder_fn_inference(
+                #    output_fn=output_fn,
+                #    encoder_state=encoder_state,
+                #    embeddings=embeddings,
+                #    start_of_sequence_id=0,
+                #    end_of_sequence_id=-1,
+                #    maximum_length=self.text_len_pl - 1,
+                #    num_decoder_symbols=self.num_classes,
+                #    name='decoder_inference_fn')
 
-            generated_sequence, _, _ = tf.contrib.seq2seq.dynamic_rnn_decoder(
-                cell=cell,
-                decoder_fn=infer_fn)
+            #generated_sequence, _, _ = tf.contrib.seq2seq.dynamic_rnn_decoder(
+            #    cell=cell,
+            #    decoder_fn=infer_fn)
 
             class_scores = tf.nn.softmax(generated_sequence)
             generated_sequence = tf.argmax(generated_sequence, axis=-1)
