@@ -236,20 +236,22 @@ class SeqGAN(object):
                                      self.text_pl[:, :-1]], axis=1)
             teacher_inp = tf.one_hot(teacher_inp, self.num_classes)
             seq_len = tf.ones((batch_size,), 'int32') * self.text_len_pl
+            softmax_layer=tf.layers.Dense(units=self.num_classes)
             train_helper = tf.contrib.seq2seq.TrainingHelper(
                 inputs=teacher_inp,
                 sequence_length=seq_len)
             teacher_decoder = tf.contrib.seq2seq.BasicDecoder(
                 cell=cell,
                 helper=train_helper,
-                initial_state=encoder_state)
+                initial_state=encoder_state,
+                output_layer=softmax_layer)
             teacher_preds, _, _ = tf.contrib.seq2seq.dynamic_decode(
                 decoder=teacher_decoder,
                 output_time_major=False,
                 impute_finished=True)
-            teacher_preds = tf.einsum('ijk,kl->ijl', teacher_preds.rnn_output, output_W)
+            #teacher_preds = tf.einsum('ijk,kl->ijl', teacher_preds.rnn_output, output_W)
             teach_loss = tf.contrib.seq2seq.sequence_loss(
-                logits=teacher_preds,
+                logits=teacher_preds.rnn_output,
                 targets=self.text_pl,
                 weights=tf.ones((batch_size, self.text_len_pl)))
             teach_loss = tf.reduce_mean(teach_loss)
@@ -279,18 +281,19 @@ class SeqGAN(object):
                     return done, state, next_input, output_var, ctx
 
             else:
+                print(self.num_classes)
                 embeddings = tf.eye(self.num_classes)
                 infer_helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(
                     embedding=embeddings,
-                    start_tokens=tf.zeros(batch_size),
+                    start_tokens=tf.zeros(batch_size, dtype=tf.int32),
                     end_token=-1)
                 infer_decoder=tf.contrib.seq2seq.BasicDecoder(
                     cell=cell,
                     helper=infer_helper,
-                    initial_state=encoder_state)
+                    initial_state=encoder_state,
+                    output_layer=softmax_layer)
                 generated_sequence, _, _ = tf.contrib.seq2seq.dynamic_decode(
                     decoder=infer_decoder,
-                    output_timer_major=False,
                     impute_finished=True,
                     maximum_iterations=10)
                 #infer_fn = tf.contrib.seq2seq.simple_decoder_fn_inference(
@@ -306,11 +309,13 @@ class SeqGAN(object):
             #generated_sequence, _, _ = tf.contrib.seq2seq.dynamic_rnn_decoder(
             #    cell=cell,
             #    decoder_fn=infer_fn)
+            print(generated_sequence.rnn_output.shape)
 
-            class_scores = tf.nn.softmax(generated_sequence)
-            generated_sequence = tf.argmax(generated_sequence, axis=-1)
+            class_scores = tf.nn.softmax(generated_sequence.rnn_output)
+            generated_sequence = tf.argmax(generated_sequence.rnn_output, axis=-1)
             # generated_sequence = multinomial_3d(generated_sequence)
 
+        print(class_scores.shape)
         tf.summary.scalar('loss/teacher', teach_loss)
 
         return class_scores, generated_sequence, teach_loss
@@ -472,24 +477,24 @@ class SeqGAN(object):
 
         g_classes, g_seq, teach_loss = self.build_generator()
         r_preds = self.build_discriminator(self.text_pl)
-        g_preds = self.build_discriminator(g_seq, reuse=True)
+        d_preds = self.build_discriminator(g_seq, reuse=True)
 
         g_weights = get_scope_variables('generator')
         d_weights = get_scope_variables('discriminator')
 
         # Adds summaries of the real and fake predictions.
-        tf.summary.histogram('predictions/fake', g_preds)
+        tf.summary.histogram('predictions/fake', d_preds)
         tf.summary.histogram('predictions/real', r_preds)
 
         # Saves predictions for analysis later.
-        self.g_preds, self.r_preds = g_preds, r_preds
+        self.d_preds, self.r_preds = d_preds, r_preds
 
         # Captures the generated sequence to use later.
         self.generated_sequence = g_seq
 
         # Computes the weight updates for the discriminator and generator.
-        dis_op = self.get_discriminator_op(r_preds, g_preds, d_weights)
-        gen_op = self.get_generator_op(g_seq, g_preds, g_classes, g_weights)
+        dis_op = self.get_discriminator_op(r_preds, d_preds, d_weights)
+        gen_op = self.get_generator_op(g_seq, d_preds, g_classes, g_weights)
 
         # Adds the teacher forcing part, decaying at some rate.
         teach_lr = 10000. / (10000. + tf.cast(self.time, 'float32'))
